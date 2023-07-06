@@ -1,0 +1,88 @@
+use std::io::{Read, Write};
+use std::net::{TcpStream, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use std::str;
+
+const IP_ADDRESS: &str = "10.33.2.123"; // Remplacez par votre adresse IP cible
+const START_PORT: u16 = 1024;
+const END_PORT: u16 = 4096;
+const THREAD_COUNT: usize = 100;
+
+fn test_port_range(start_port: u16, end_port: u16, port_found: Arc<AtomicBool>, result: Arc<Mutex<Option<u16>>>) {
+    for port in start_port..=end_port {
+        if port_found.load(Ordering::Relaxed) {
+            break;
+        }
+        println!("Port checker {}",port);
+
+        let addr: SocketAddr = format!("{}:{}", IP_ADDRESS, port).parse().unwrap();
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(10)) {
+            Ok(_) => {
+                port_found.store(true, Ordering::Relaxed);
+                let mut stream = TcpStream::connect(&addr).unwrap();
+                stream.write_all(b"ping").unwrap();
+                let mut response = Vec::new();
+                let _ = stream.read_to_end(&mut response).unwrap();
+                if str::from_utf8(&response).unwrap() == "pong" {
+                    let mut result_lock = result.lock().unwrap();
+                    *result_lock = Some(port);
+                    break;
+                }
+            },
+            Err(_) => (),
+        }
+    }
+}
+
+fn main() {
+    let port_found = Arc::new(AtomicBool::new(false));
+    let result = Arc::new(Mutex::new(None));
+    let mut threads = Vec::with_capacity(THREAD_COUNT);
+    let ports_per_thread = (END_PORT - START_PORT + 1) / THREAD_COUNT as u16;
+
+    for i in 0..THREAD_COUNT {
+        let port_found = Arc::clone(&port_found);
+        let result = Arc::clone(&result);
+
+        let start_port = START_PORT + i as u16 * ports_per_thread;
+        let end_port = if i == THREAD_COUNT - 1 {
+            END_PORT
+        } else {
+            start_port + ports_per_thread - 1
+        };
+
+        threads.push(thread::spawn(move || {
+            test_port_range(start_port, end_port, port_found, result);
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let final_result = result.lock().unwrap().clone();
+
+    if let Some(port) = final_result {
+        println!("Port ouvert trouvé : {}", port);
+        // Effectuez ici l'action souhaitée une fois le port trouvé
+        // Par exemple, vous pouvez envoyer une requête POST
+        let addr: SocketAddr = format!("{}:{}", IP_ADDRESS, port).parse().unwrap();
+        let mut stream = TcpStream::connect(&addr).unwrap();
+        stream.write_all(b"POST /signup HTTP/1.1\r\n").unwrap();
+        stream.write_all(b"Host: 10.33.2.123\r\n").unwrap();
+        stream.write_all(b"Content-Type: application/json\r\n").unwrap();
+        stream.write_all(b"\r\n").unwrap();
+        stream.write_all(b"{\"User\":\"nacer\"}").unwrap();
+        stream.write_all(b"\r\n").unwrap();
+
+        // Lire la réponse du serveur
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response).unwrap();
+        println!("Réponse du serveur : {}", String::from_utf8_lossy(&response));
+    } else {
+        println!("Aucun port ouvert trouvé entre {} et {}", START_PORT, END_PORT);
+    }
+}
